@@ -1,0 +1,684 @@
+<?php
+/*
+Plugin Name: سیستم تایید اصالت سکه (نسخه نهایی)
+Description: مدیریت سکه‌ها، تولید شماره سریال، ساخت QR کد، بررسی اصالت و مدیریت وضعیت چاپ با استفاده از کلید متای سفارشی.
+Version: 1.2
+Author: Your Name
+*/
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+// 1. ثبت پست تایپ سفارشی برای سکه ها
+add_action('init', 'gca_register_coin_post_type');
+function gca_register_coin_post_type() {
+    $args = array(
+        'labels'      => array(
+            'name'          => 'اصالت سکه‌ها',
+            'singular_name' => 'سکه',
+            'add_new'       => 'افزودن سکه (دستی)',
+            'add_new_item'  => 'افزودن سکه جدید',
+            'edit_item'     => 'ویرایش سکه',
+            'all_items'     => 'لیست تمام سکه‌ها',
+        ),
+        'public'      => true,
+        'has_archive' => false,
+        'supports'    => array('title'),
+        'menu_icon'   => 'dashicons-money-alt',
+    );
+    register_post_type('gold_coin', $args);
+}
+
+// 2. ساخت منوهای مدیریت
+add_action('admin_menu', 'gca_add_admin_menus');
+function gca_add_admin_menus() {
+    add_submenu_page(
+        'edit.php?post_type=gold_coin',
+        'تولید خودکار سکه',
+        'تولید خودکار سکه',
+        'manage_options',
+        'gca-generate-coins',
+        'gca_generate_coins_page'
+    );
+    add_submenu_page(
+        'edit.php?post_type=gold_coin',
+        'بروزرسانی داده‌های قبلی',
+        'بروزرسانی QR کدهای قدیمی',
+        'manage_options',
+        'gca-sync-old-data',
+        'gca_sync_old_data_page'
+    );
+}
+
+// 3. صفحه تولید خودکار سکه
+function gca_generate_coins_page() {
+    if (isset($_POST['gca_generate'])) {
+        $coin_type = sanitize_text_field($_POST['coin_type']);
+        $quantity = intval($_POST['quantity']);
+        $prefix = '';
+
+        switch ($coin_type) {
+            case 'full': $prefix = 'F-'; $type_name = 'تمام سکه'; break;
+            case 'half': $prefix = 'H-'; $type_name = 'نیم سکه'; break;
+            case 'quarter': $prefix = 'Q-'; $type_name = 'ربع سکه'; break;
+            case '1gram': $prefix = 'G-'; $type_name = 'سکه یک گرمی'; break;
+        }
+
+        for ($i = 0; $i < $quantity; $i++) {
+            $random_string = strtoupper(substr(md5(uniqid(mt_rand(), true)), 0, 8));
+            $serial_number = $prefix . $random_string;
+            
+            $post_id = wp_insert_post(array(
+                'post_title'  => $serial_number,
+                'post_type'   => 'gold_coin',
+                'post_status' => 'publish'
+            ));
+
+            if ($post_id) {
+                // *** اصلاح شد: استفاده از _coin_serial برای هماهنگی ***
+                update_post_meta($post_id, '_coin_serial', $serial_number);
+                update_post_meta($post_id, 'coin_type', $type_name);
+                update_post_meta($post_id, '_coin_is_printed', '0'); // پیش‌فرض: چاپ نشده
+                
+               $verify_link = site_url('/verify-coin/?serial=' . rawurlencode($serial_number));
+$qr_url = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=" . urlencode($verify_link);
+
+
+                update_post_meta($post_id, 'qr_code_url', $qr_url);
+            }
+        }
+        echo '<div class="notice notice-success"><p>' . $quantity . ' سکه جدید با موفقیت تولید شد.</p></div>';
+    }
+    ?>
+    <div class="wrap">
+        <h1>تولید خودکار سکه</h1>
+        <form method="POST">
+            <table class="form-table">
+                <tr>
+                    <th><label for="coin_type">نوع سکه</label></th>
+                    <td>
+                        <select name="coin_type" id="coin_type">
+                            <option value="full">تمام سکه (F)</option>
+                            <option value="half">نیم سکه (H)</option>
+                            <option value="quarter">ربع سکه (Q)</option>
+                            <option value="1gram">سکه یک گرمی (G)</option>
+                        </select>
+                    </td>
+                </tr>
+                <tr>
+                    <th><label for="quantity">تعداد</label></th>
+                    <td><input type="number" name="quantity" id="quantity" value="1" min="1" max="100"></td>
+                </tr>
+            </table>
+            <p class="submit"><input type="submit" name="gca_generate" class="button button-primary" value="تولید سکه‌ها"></p>
+        </form>
+    </div>
+    <?php
+}
+
+// 4. ابزار همگام‌سازی
+function gca_sync_old_data_page() {
+    if (isset($_POST['gca_sync'])) {
+        $args = array(
+            'post_type'      => 'gold_coin',
+            'posts_per_page' => -1,
+            'meta_query'     => array(
+                array(
+                    'key'     => 'qr_code_url',
+                    'compare' => 'NOT EXISTS'
+                )
+            )
+        );
+        $coins = get_posts($args);
+        $count = 0;
+        foreach ($coins as $coin) {
+            // *** اصلاح شد: استفاده از _coin_serial برای هماهنگی ***
+            $serial_number = get_post_meta($coin->ID, '_coin_serial', true);
+            if (empty($serial_number)) {
+                $serial_number = $coin->post_title;
+                update_post_meta($coin->ID, '_coin_serial', $serial_number);
+            }
+            $verify_link = site_url('/verify-coin/?serial=' . rawurlencode($serial_number));
+$qr_url = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=" . urlencode($verify_link);
+
+
+            update_post_meta($coin->ID, 'qr_code_url', $qr_url);
+            $count++;
+        }
+        echo '<div class="notice notice-success"><p>تعداد ' . $count . ' QR کد برای داده‌های قدیمی ساخته شد.</p></div>';
+    }
+    ?>
+    <div class="wrap">
+        <h1>بروزرسانی داده‌های قبلی</h1>
+        <p>تولید QR کد برای داده‌های ایمپورت شده که فاقد آن هستند.</p>
+        <form method="POST">
+            <p class="submit"><input type="submit" name="gca_sync" class="button button-primary" value="تولید QR کد"></p>
+        </form>
+    </div>
+    <?php
+}
+
+// 5. ایجاد Rewrite Rule
+add_action('init', 'gca_rewrite_rule');
+function gca_rewrite_rule() {
+    add_rewrite_rule('^coin-verify/([^/]+)/?$', 'index.php?coin_serial=$matches[1]', 'top');
+}
+
+add_filter('query_vars', 'gca_register_query_var');
+function gca_register_query_var($vars) {
+    $vars[] = 'coin_serial';
+    return $vars;
+}
+
+add_action('template_redirect', 'gca_verify_coin_frontend');
+function gca_verify_coin_frontend() {
+    if (isset($_GET['serial'])) {
+        $serial = sanitize_text_field(trim($_GET['serial']));
+        
+        global $wpdb;
+
+        $post_id = $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT post_id 
+                 FROM {$wpdb->postmeta}
+                 WHERE meta_key = '_coin_serial'
+                 AND meta_value = %s
+                 LIMIT 1",
+                $serial
+            )
+        );
+
+        echo '<!DOCTYPE html><html dir="rtl" lang="fa"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>تایید اصالت سکه</title><style>body{font-family:Tahoma,Arial,sans-serif;background:#f4f4f9;text-align:center;padding:50px 20px;} .box{ background:#fff;padding:30px;border-radius:10px;
+    box-shadow:0 4px 8px rgba(0,0,0,0.1);
+    max-width:1100px;
+    width:95%;
+    margin:0 auto;
+}
+        .success{color:#28a745;} .error{color:#dc3545;} h1{font-size:24px;margin-bottom:10px;} .serial{font-size:20px;font-weight:bold;letter-spacing:2px;margin:20px 0;padding:10px;background:#eee;border-radius:5px;} a.btn{display:inline-block;margin-top:20px;padding:10px 20px;background:#007bff;color:#fff;text-decoration:none;border-radius:5px;}</style></head><body>';
+        echo '<div class="box">';
+
+        if ($post_id) {
+            $coin_type = get_post_meta($post_id, 'coin_type', true);
+            $is_printed = get_post_meta($post_id, '_coin_is_printed', true);
+
+          // متن اختصاصی بر اساس نوع سکه
+$message = '';
+
+switch ($coin_type) {
+
+    case 'تمام سکه':
+        $message = 'اصالت سکه تمام امامی با سریال <strong>' . esc_html($serial) . '</strong> مورد تأیید شرکت <strong>صرافی دی</strong> میباشد و باز خرید آن توسط این شرکت تضمین میگردد.';
+    break;
+
+    case 'نیم سکه':
+        $message = 'اصالت سکه نیم بهار با سریال <strong>' . esc_html($serial) . '</strong> مورد تأیید شرکت <strong>صرافی دی</strong> میباشد و باز خرید آن توسط این شرکت تضمین میگردد.';
+    break;
+
+    case 'ربع سکه':
+        $message = 'اصالت سکه ربع بهار با سریال <strong>' . esc_html($serial) . '</strong> مورد تأیید شرکت <strong>صرافی دی</strong> میباشد و باز خرید آن توسط این شرکت تضمین میگردد.';
+    break;
+
+    case 'سکه یک گرمی':
+        $message = 'اصالت سکه یک گرمی با سریال <strong>' . esc_html($serial) . '</strong> مورد تأیید شرکت <strong>صرافی دی</strong> میباشد و باز خرید آن توسط این شرکت تضمین میگردد.';
+    break;
+
+    default:
+        $message = 'اصالت سکه با سریال <strong>' . esc_html($serial) . '</strong> مورد تأیید شرکت <strong>صرافی دی</strong> میباشد.';
+}
+
+
+
+// تشخیص نوع سکه از روی ابتدای سریال
+$coin_name = 'سکه';
+
+if (strpos($serial, 'F-') === 0) {
+    $coin_name = 'سکه تمام بهار';
+}
+elseif (strpos($serial, 'H-') === 0) {
+    $coin_name = 'نیم سکه';
+}
+elseif (strpos($serial, 'Q-') === 0) {
+    $coin_name = 'ربع سکه';
+}
+elseif (strpos($serial, 'G-') === 0) {
+    $coin_name = 'سکه یک گرمی';
+}
+
+echo '
+
+<style>
+
+.coin-verify-box{
+    border:1px solid #e5e5e5;
+    background:#fafafa;
+    border-radius:10px;
+    padding:16px 22px;
+    margin-top:15px;
+    text-align:center;
+    width:100%;
+    box-sizing:border-box;
+    font-family:Peyda,Tahoma,sans-serif;
+}
+
+.coin-verify-text{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    gap:10px;
+    font-size:14px;
+    color:#222;
+    line-height:2;
+    white-space:nowrap;
+    font-family:Peyda,Tahoma,sans-serif;
+}
+
+.coin-verify-icon{
+    color:#28a745;
+    font-size:18px;
+    font-weight:bold;
+    line-height:1;
+    flex-shrink:0;
+}
+
+.coin-verify-serial{
+    font-weight:700;
+    letter-spacing:1px;
+}
+
+/* موبایل */
+@media(max-width:768px){
+
+    .coin-verify-box{
+        padding:14px 16px;
+        width:92%;
+        margin:15px auto 0 auto;
+    }
+
+    .coin-verify-text{
+        white-space:normal;
+        display:flex;
+        align-items:flex-start;
+        justify-content:center;
+        gap:8px;
+        font-size:13px;
+        line-height:2.1;
+        word-break:break-word;
+        text-align:right;
+    }
+
+    .coin-verify-icon{
+        display:inline-flex;
+        margin-bottom:0;
+        margin-top:4px;
+        flex-shrink:0;
+    }
+
+}
+
+</style>
+
+<div class="coin-verify-box">
+
+    <div class="coin-verify-text">
+
+        <span class="coin-verify-icon">
+            ✅
+        </span>
+
+        <span>
+
+            اصالت ' . esc_html($coin_name) . ' با شماره سریال 
+
+            <strong class="coin-verify-serial">
+                ' . esc_html($serial) . '
+            </strong>
+
+            مورد تأیید شرکت 
+
+            <strong>
+                صرافی دی
+            </strong>
+
+            می‌باشد و باز خرید آن توسط این شرکت تضمین می‌گردد.
+
+        </span>
+
+    </div>
+
+</div>
+';
+          
+
+        } else {
+            echo '<h1 class="error">❌ سکه یافت نشد!</h1>';
+            echo '<p>متاسفانه شماره سریال وارد شده در سیستم ما معتبر نیست.</p>';
+            echo '<div class="serial">' . esc_html($serial) . '</div>';
+        }
+
+        echo '<a href="' . site_url() . '" class="btn">بازگشت به سایت</a>';
+        echo '</div></body></html>';
+        exit;
+    }
+}
+
+
+
+
+function verify_coin_shortcode_handler() {
+    global $wpdb;
+
+    // گرفتن مقدار سریال از URL
+    $serial = isset($_GET['serial']) ? sanitize_text_field($_GET['serial']) : '';
+
+    if (!$serial) {
+        return '<p>شماره سریال وارد نشده است.</p>';
+    }
+
+    // جستجو در جدول wp_postmeta برای سریال
+    $table_name = $wpdb->prefix . 'postmeta';
+    $query = $wpdb->prepare(
+        "SELECT post_id FROM $table_name WHERE meta_key = %s AND meta_value = %s",
+        '_coin_serial',
+        $serial
+    );
+
+    $post_id = $wpdb->get_var($query);
+
+    if ($post_id) {
+        return "<p>سکه با شماره سریال <strong>{$serial}</strong> تایید شد.</p>";
+    } else {
+        return "<p>سکه با شماره سریال <strong>{$serial}</strong> یافت نشد یا اصالت آن تایید نمی‌شود.</p>";
+    }
+}
+
+add_shortcode('verify_coin', 'verify_coin_shortcode_handler');
+
+
+
+// 7. نمایش متا باکس (QR کد و وضعیت چاپ)
+add_action('add_meta_boxes', 'gca_add_qr_metabox');
+function gca_add_qr_metabox() {
+    add_meta_box('gca_qr_meta', 'اطلاعات، QR کد و وضعیت چاپ', 'gca_qr_metabox_html', 'gold_coin', 'side', 'high');
+}
+
+function gca_qr_metabox_html($post) {
+    $qr_url = get_post_meta($post->ID, 'qr_code_url', true);
+    // *** اصلاح شد: استفاده از _coin_serial برای هماهنگی ***
+    $serial = get_post_meta($post->ID, '_coin_serial', true);
+    $is_printed = get_post_meta($post->ID, '_coin_is_printed', true);
+    
+    wp_nonce_field('gca_save_print_status', 'gca_print_nonce');
+
+    if ($serial) {
+        echo '<p><strong>شماره سریال:</strong> ' . esc_html($serial) . '</p>';
+        
+        $checked = ($is_printed == '1') ? 'checked' : '';
+        echo '<p><label><input type="checkbox" name="coin_is_printed" value="1" ' . $checked . '> <strong>این QR کد چاپ شده است</strong></label></p>';
+
+        if ($qr_url) {
+            echo '<img src="' . esc_url($qr_url) . '" style="max-width:100%; height:auto; display:block; margin: 10px 0;" />';
+           echo '<p><a href="' . site_url('/verify-coin/?serial=' . rawurlencode($serial)) . '" target="_blank">مشاهده صفحه اصالت‌سنجی</a></p>';
+
+        } else {
+            echo '<p style="color:red;">QR کد هنوز ساخته نشده است. از بخش بروزرسانی استفاده کنید.</p>';
+        }
+    } else {
+        echo '<p>ابتدا سکه را ذخیره کنید.</p>';
+    }
+}
+
+//نمایش سکه 
+
+add_action('template_redirect', 'gca_redirect_coin_single');
+
+function gca_redirect_coin_single() {
+
+    if (is_singular('gold_coin')) {
+
+        global $post;
+
+        $serial = get_post_meta($post->ID, '_coin_serial', true);
+
+        if ($serial) {
+
+            wp_redirect(site_url('/verify-coin/?serial=' . rawurlencode($serial)), 301);
+            exit;
+
+        }
+
+    }
+
+}
+
+
+
+
+
+function generate_coin_pdf_by_ids($post_ids) {
+
+    global $wpdb;
+
+    if (empty($post_ids)) {
+        wp_die('هیچ سکه‌ای انتخاب نشده است');
+    }
+
+    $ids_placeholders = implode(',', array_fill(0, count($post_ids), '%d'));
+
+   $coins = [];
+
+foreach ($post_ids as $post_id) {
+
+    $serial = get_post_meta($post_id, '_coin_serial', true);
+
+    if (!$serial) {
+        continue;
+    }
+
+    $coin_type = get_post_meta($post_id, 'coin_type', true);
+
+    $coins[] = (object) [
+        'serial' => $serial,
+        'coin_type' => $coin_type
+    ];
+}
+
+    if (empty($coins)) {
+        wp_die('هیچ سکه‌ای یافت نشد');
+    }
+
+    require_once __DIR__ . '/fpdf/fpdf.php';
+    require_once __DIR__ . '/phpqrcode/qrlib.php';
+
+    while (ob_get_level()) {
+        ob_end_clean();
+    }
+
+    $pdf = new FPDF('P', 'mm', 'A4');
+
+    $pdf->SetMargins(5, 5, 5);
+
+    $pdf->AddPage();
+
+    $pdf->SetAutoPageBreak(false);
+
+    $pdf->SetFont('Arial', '', 5);
+
+    // تنظیمات جدول
+    $startX = 8;
+    $startY = 8;
+
+    $qrSize = 25; // حدود 1 اینچ
+
+    $cellWidth = 38;
+    $cellHeight = 45;
+
+    $cols = 5;
+
+    $i = 0;
+
+    foreach ($coins as $coin) {
+
+        $serial = trim($coin->serial);
+
+        $coin_type = trim($coin->coin_type);
+
+        $url = site_url('/verify-coin/?serial=' . rawurlencode($serial));
+
+        $upload_dir = wp_upload_dir();
+
+        $qr_dir = $upload_dir['basedir'] . '/coin_qr_codes';
+
+        if (!file_exists($qr_dir)) {
+            wp_mkdir_p($qr_dir);
+        }
+
+        $qr_file = $qr_dir . '/qr_' . md5($serial) . '.png';
+
+        if (!file_exists($qr_file)) {
+            QRcode::png($url, $qr_file, QR_ECLEVEL_L, 4);
+        }
+
+        $row = floor($i / $cols) % 6;
+
+        $col = $i % $cols;
+
+        $x = $startX + ($col * $cellWidth);
+
+        $y = $startY + ($row * $cellHeight);
+
+        // صفحه جدید بعد از 30 آیتم
+        if ($i > 0 && $i % 30 == 0) {
+
+            $pdf->AddPage();
+
+            $row = 0;
+            $col = 0;
+
+            $x = $startX;
+            $y = $startY;
+        }
+
+        // QR
+        if (file_exists($qr_file)) {
+
+            $pdf->Image($qr_file, $x + 5, $y, $qrSize, $qrSize);
+
+        }
+
+        // شماره سریال
+        $pdf->SetXY($x, $y + 27);
+
+        $pdf->Cell(38, 3, $serial, 0, 0, 'C');
+
+        // نوع سکه
+        $pdf->SetXY($x, $y + 31);
+
+        $pdf->Cell(38, 3, $coin_type, 0, 0, 'C');
+
+        // متن تایید اصالت
+        $pdf->SetXY($x, $y + 35);
+
+        $pdf->Cell(38, 3, 'Authenticity Verified', 0, 0, 'C');
+
+        $i++;
+    }
+
+    $pdf->Output('D', 'coins-qr.pdf');
+
+    exit;
+}
+
+
+
+
+
+
+// ذخیره وضعیت چاپ هنگام آپدیت پست
+add_action('save_post', 'gca_save_print_status_meta');
+function gca_save_print_status_meta($post_id) {
+    if (!isset($_POST['gca_print_nonce']) || !wp_verify_nonce($_POST['gca_print_nonce'], 'gca_save_print_status')) {
+        return;
+    }
+    if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
+        return;
+    }
+    if (isset($_POST['post_type']) && 'gold_coin' == $_POST['post_type']) {
+        if (!current_user_can('edit_post', $post_id)) {
+            return;
+        }
+    }
+
+    $is_printed = isset($_POST['coin_is_printed']) ? '1' : '0';
+    update_post_meta($post_id, '_coin_is_printed', $is_printed);
+}
+
+// 8. افزودن ستون وضعیت چاپ به لیست سکه‌ها در پیشخوان
+add_filter('manage_gold_coin_posts_columns', 'gca_set_custom_edit_gold_coin_columns');
+function gca_set_custom_edit_gold_coin_columns($columns) {
+    $columns['coin_type'] = 'نوع سکه';
+    $columns['qr_preview'] = 'QR کد';
+    $columns['is_printed'] = 'وضعیت چاپ';
+    return $columns;
+}
+
+add_action('manage_gold_coin_posts_custom_column', 'gca_custom_gold_coin_column', 10, 2);
+function gca_custom_gold_coin_column($column, $post_id) {
+    switch ($column) {
+        case 'coin_type':
+            echo esc_html(get_post_meta($post_id, 'coin_type', true));
+            break;
+        case 'qr_preview':
+            $qr = get_post_meta($post_id, 'qr_code_url', true);
+            if ($qr) {
+                echo '<img src="' . esc_url($qr) . '" style="width:50px;height:50px;" />';
+            } else {
+                echo '-';
+            }
+            break;
+        case 'is_printed':
+            $printed = get_post_meta($post_id, '_coin_is_printed', true);
+            if ($printed == '1') {
+                echo '<span style="color:green; font-weight:bold;">✅ چاپ شده</span>';
+            } else {
+                echo '<span style="color:red;">❌ چاپ نشده</span>';
+            }
+            break;
+    }
+}
+
+
+// افزودن گزینه خروجی PDF به bulk action// ثبت گزینه Bulk Action
+add_filter('bulk_actions-edit-gold_coin', 'gca_register_bulk_pdf_action');
+
+function gca_register_bulk_pdf_action($bulk_actions) {
+
+    $bulk_actions['generate_pdf'] = 'دانلود PDF QR';
+
+    return $bulk_actions;
+}
+
+
+// اجرای Bulk Action
+add_filter('handle_bulk_actions-edit-gold_coin', 'gca_handle_bulk_pdf_action', 10, 3);
+
+function gca_handle_bulk_pdf_action($redirect_to, $doaction, $post_ids) {
+
+    if ($doaction !== 'generate_pdf') {
+        return $redirect_to;
+    }
+
+    // جلوگیری از هر خروجی اضافی
+    if (ob_get_length()) {
+        ob_end_clean();
+    }
+
+    generate_coin_pdf_by_ids($post_ids);
+
+    exit;
+}
+
+
+
+
+?>
